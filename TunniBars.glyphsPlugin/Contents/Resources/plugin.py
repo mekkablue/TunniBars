@@ -396,6 +396,20 @@ class TunniBars(ReporterPlugin):
 		})
 
 	@objc.python_method
+	def conditionsAreMetForDrawing(self):
+		"""Don't draw while the Hand tool is active, which is what the space bar switches to temporarily."""
+		try:
+			currentController = self.controller.view().window().windowController()
+		except AttributeError:
+			# controller, view or window not available (e.g. during window setup/teardown)
+			return False
+		if currentController:
+			tool = currentController.toolDrawDelegate()
+			if not tool.isKindOfClass_(NSClassFromString("GlyphsToolHand")):
+				return True
+		return False
+
+	@objc.python_method
 	def foreground(self, layer):
 		if not self.conditionsAreMetForDrawing():
 			return  # no bars in preview (space bar), Text tool or Hand tool
