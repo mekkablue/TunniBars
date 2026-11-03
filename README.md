@@ -28,7 +28,9 @@ A bar that is being dragged is drawn solid, even if its segment is not selected.
 
 ## Installation
 
-Copy `TunniBars.glyphsPlugin` into the Glyphs plug-ins folder (*Glyphs > Settings > Addons > Plugins > Show in Finder*) and restart Glyphs.
+Install Tunni Bars with a single click in *Window > Plugin Manager*: find **Tunni Bars** in the *Plugins* list, click *Install*, and restart Glyphs. Then switch it on in *View > Show Tunni Bars*.
+
+To install it manually instead, copy `TunniBars.glyphsPlugin` into the Glyphs plug-ins folder (*Glyphs > Settings > Addons > Plugins > Show in Finder*) and restart Glyphs.
 
 ## Credits
 
