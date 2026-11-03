@@ -397,6 +397,8 @@ class TunniBars(ReporterPlugin):
 
 	@objc.python_method
 	def foreground(self, layer):
+		if not self.conditionsAreMetForDrawing():
+			return  # no bars in preview (space bar), Text tool or Hand tool
 		scale = self.getScale()
 		selection = set(layer.selection)
 		for a, b, c, d in curveSegments(layer):
@@ -515,6 +517,8 @@ class TunniBars(ReporterPlugin):
 	def mouseDown(self, event):
 		"""Returns True if the click hit a Tunni bar and was taken care of here."""
 		self.barDrag = None
+		if not self.conditionsAreMetForDrawing():
+			return False
 		view = self.editViewForEvent(event)
 		if view is None:
 			return False
