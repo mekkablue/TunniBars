@@ -46,6 +46,9 @@ ROUNDING = 1.0
 BAR_TOLERANCE = 7.0
 HANDLE_MARGIN = 3.0
 
+# A drag that has seen no event for this long is considered abandoned (a mouse-up got lost).
+STALE_DRAG_SECONDS = 1.0
+
 EPSILON = 1e-9
 
 # Handles count as balanced if both are within this many units of the balanced position.
@@ -505,8 +508,14 @@ class TunniBars(ReporterPlugin):
 			elif eventType == NSEventTypeMouseMoved:
 				self.updateCursor(event)
 		except Exception:
-			self.barDrag = None
 			LogError(traceback.format_exc())
+			if self.barDrag is not None:
+				if event.type() == NSEventTypeLeftMouseDragged:
+					return None  # keep swallowing the drag; Glyphs must not start a marquee. Mouse-up ends it.
+				if event.type() == NSEventTypeLeftMouseUp:
+					self.barDrag = None
+					return None
+			self.barDrag = None
 		return event
 
 	@objc.python_method
@@ -582,6 +591,12 @@ class TunniBars(ReporterPlugin):
 	@objc.python_method
 	def mouseDown(self, event):
 		"""Returns True if the click hit a Tunni bar and was taken care of here."""
+		drag = self.barDrag
+		if drag is not None and event.timestamp() - drag["lastEventTime"] < STALE_DRAG_SECONDS:
+			# Another mouse-down while a drag is going on (the button is still held): never restart or
+			# drop the drag, and don't let it reach Glyphs, which would start a marquee selection.
+			drag["lastEventTime"] = event.timestamp()
+			return True
 		self.barDrag = None
 		if not self.conditionsAreMetForDrawing():
 			return False
@@ -597,7 +612,7 @@ class TunniBars(ReporterPlugin):
 			return False
 		if event.clickCount() >= 2:
 			self.balanceBar(layer, bar)
-			self.barDrag = {"layer": layer, "state": None, "undoOpen": False}  # swallow the rest of this click
+			self.barDrag = {"layer": layer, "state": None, "undoOpen": False, "lastEventTime": event.timestamp()}  # swallow the rest of this click
 		else:
 			windowPoint = event.locationInWindow()
 			NSCursor.closedHandCursor().set()
@@ -608,12 +623,14 @@ class TunniBars(ReporterPlugin):
 				"previousPoint": (windowPoint.x, windowPoint.y),
 				"movement": 0.0,
 				"undoOpen": False,
+				"lastEventTime": event.timestamp(),
 			}
 		return True
 
 	@objc.python_method
 	def mouseDragged(self, event):
 		drag = self.barDrag
+		drag["lastEventTime"] = event.timestamp()
 		NSCursor.closedHandCursor().set()  # Glyphs may reset the cursor (e.g. on redraw) while the button is down
 		if drag["state"] is None:
 			return
