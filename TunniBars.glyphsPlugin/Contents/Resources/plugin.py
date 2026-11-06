@@ -21,7 +21,6 @@ from AppKit import (
 	NSBeep,
 	NSBezierPath,
 	NSColor,
-	NSCursor,
 	NSEvent,
 	NSEventMaskLeftMouseDown,
 	NSEventMaskLeftMouseDragged,
@@ -33,7 +32,7 @@ from AppKit import (
 	NSEventTypeMouseMoved,
 	NSUserDefaults,
 )
-from Foundation import NSClassFromString, NSOperationQueue, NSPoint, NSPointInRect
+from Foundation import NSClassFromString, NSPoint, NSPointInRect
 from GlyphsApp import Glyphs, GSOFFCURVE, LogError
 from GlyphsApp.plugins import ReporterPlugin
 
@@ -381,12 +380,20 @@ def segmentIsActive(selection, a, b, c, d):
 	return b in selection or c in selection or (a in selection and d in selection)
 
 
-def tunniColor(balanced, dark, alpha):
-	"""Blue for balanced handles, grey for unbalanced ones, each in a variant for light and dark backgrounds."""
+def tunniColor(balanced, dark, alpha, hover=False):
+	"""
+	Blue for balanced handles, grey for unbalanced ones, each in a variant for light and dark backgrounds.
+	The hovered bar is fully opaque, and brighter on dark backgrounds.
+	"""
 	if balanced:
-		red, green, blue = (0.35, 0.6, 1.0) if dark else (0.0, 0.35, 1.0)
+		if dark:
+			red, green, blue = (0.55, 0.75, 1.0) if hover else (0.35, 0.6, 1.0)
+		else:
+			red, green, blue = (0.0, 0.35, 1.0)
 	else:
-		red = green = blue = 0.75 if dark else 0.45
+		red = green = blue = (0.95 if hover else 0.75) if dark else 0.45
+	if hover:
+		alpha = 1.0
 	return NSColor.colorWithCalibratedRed_green_blue_alpha_(red, green, blue, alpha)
 
 
@@ -408,7 +415,7 @@ def handleSizeInPixels():
 class TunniBars(ReporterPlugin):
 
 	barDrag = None  # state of the Tunni bar drag in progress, if any
-	cursorIsOverBar = False  # True while we have set the pointing hand cursor
+	hoverBar = None  # (a, b, c, d) nodes of the Tunni bar under the mouse, if any
 
 	@objc.python_method
 	def settings(self):
@@ -455,8 +462,11 @@ class TunniBars(ReporterPlugin):
 			bar.moveToPoint_(NSPoint(*points[1]))
 			bar.lineToPoint_(NSPoint(*points[2]))
 			bar.setLineWidth_(1.0 / scale)
+			hover = self.hoverBar == (a, b, c, d)
+			if hover:
+				active = True
 			if active:
-				barColor = tunniColor(balanced, dark, 0.6 if balanced else 0.7)
+				barColor = tunniColor(balanced, dark, 0.6 if balanced else 0.7, hover)
 			else:
 				barColor = tunniColor(balanced, dark, 0.25)
 				bar.setLineDash_count_phase_([3.0 / scale, 3.0 / scale], 2, 0)
@@ -487,7 +497,7 @@ class TunniBars(ReporterPlugin):
 	@objc.python_method
 	def start(self):
 		self.barDrag = None
-		self.cursorIsOverBar = False
+		self.hoverBar = None
 		mask = NSEventMaskLeftMouseDown | NSEventMaskLeftMouseDragged | NSEventMaskLeftMouseUp | NSEventMaskMouseMoved
 		self.eventMonitor = NSEvent.addLocalMonitorForEventsMatchingMask_handler_(mask, self.handleEvent)
 
@@ -512,7 +522,7 @@ class TunniBars(ReporterPlugin):
 					self.mouseUp(event)
 					return None
 			elif eventType == NSEventTypeMouseMoved:
-				self.updateCursor(event)
+				self.updateHover(event)
 		except Exception:
 			LogError(traceback.format_exc())
 			if self.barDrag is not None:
@@ -570,13 +580,8 @@ class TunniBars(ReporterPlugin):
 		return bestBar
 
 	@objc.python_method
-	def setCursorLater(self, cursor):
-		"""Glyphs sets its own cursor while handling the event, so set ours right after that."""
-		NSOperationQueue.mainQueue().addOperationWithBlock_(lambda: cursor.set())
-
-	@objc.python_method
-	def updateCursor(self, event):
-		"""Pointing hand while the mouse is over a Tunni bar that can be grabbed."""
+	def updateHover(self, event):
+		"""Remember the Tunni bar that can be grabbed at the mouse position, to draw it highlighted."""
 		if self.barDrag is not None:
 			return
 		bar = None
@@ -585,14 +590,9 @@ class TunniBars(ReporterPlugin):
 			layer = view.activeLayer() if view is not None else None
 			if layer is not None:
 				bar = self.barAtLocation(layer, view.getActiveLocation_(event), view.scale())
-		if bar is not None:
-			self.cursorIsOverBar = True
-			NSCursor.pointingHandCursor().set()
-			self.setCursorLater(NSCursor.pointingHandCursor())
-		elif self.cursorIsOverBar:
-			self.cursorIsOverBar = False
-			NSCursor.arrowCursor().set()
-			self.setCursorLater(NSCursor.arrowCursor())
+		if bar != self.hoverBar:
+			self.hoverBar = bar
+			Glyphs.redraw()
 
 	@objc.python_method
 	def mouseDown(self, event):
@@ -621,7 +621,6 @@ class TunniBars(ReporterPlugin):
 			self.barDrag = {"layer": layer, "state": None, "undoOpen": False, "lastEventTime": event.timestamp()}  # swallow the rest of this click
 		else:
 			windowPoint = event.locationInWindow()
-			NSCursor.closedHandCursor().set()
 			self.barDrag = {
 				"layer": layer,
 				"bar": bar,
@@ -637,7 +636,6 @@ class TunniBars(ReporterPlugin):
 	def mouseDragged(self, event):
 		drag = self.barDrag
 		drag["lastEventTime"] = event.timestamp()
-		NSCursor.closedHandCursor().set()  # Glyphs may reset the cursor (e.g. on redraw) while the button is down
 		if drag["state"] is None:
 			return
 		# Only the raw mouse movement between two events counts, in window points, divided by the zoom.
@@ -662,8 +660,6 @@ class TunniBars(ReporterPlugin):
 	def mouseUp(self, event):
 		drag = self.barDrag
 		self.barDrag = None
-		self.cursorIsOverBar = False
-		NSCursor.arrowCursor().set()
 		if drag["undoOpen"]:
 			drag["layer"].parent.endUndo()
 
