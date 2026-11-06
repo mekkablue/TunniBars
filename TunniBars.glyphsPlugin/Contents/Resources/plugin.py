@@ -623,6 +623,7 @@ class TunniBars(ReporterPlugin):
 			windowPoint = event.locationInWindow()
 			self.barDrag = {
 				"layer": layer,
+				"view": view,
 				"bar": bar,
 				"state": dragStateForBar(*[positionOf(node) for node in bar]),
 				"previousPoint": (windowPoint.x, windowPoint.y),
@@ -641,7 +642,7 @@ class TunniBars(ReporterPlugin):
 		# Only the raw mouse movement between two events counts, in window points, divided by the zoom.
 		# Positions from getActiveLocation_() are not used here: they can jump from one drag event to
 		# the next, and a jump of a few units is all it takes to snap the handles to 0% or 100%.
-		scale = self.controller.graphicView().scale()
+		scale = drag["view"].scale()  # self.controller can be None while dragging
 		windowPoint = event.locationInWindow()
 		previousPoint = drag["previousPoint"]
 		drag["previousPoint"] = (windowPoint.x, windowPoint.y)
