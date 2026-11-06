@@ -439,7 +439,7 @@ class TunniBars(ReporterPlugin):
 
 	@objc.python_method
 	def conditionsAreMetForDrawing(self):
-		"""Don't draw while the Hand tool is active, which is what the space bar switches to temporarily."""
+		"""Draw only while the Select tool is active: no bars in text mode, preview, or with the Hand tool (space bar)."""
 		try:
 			currentController = self.currentEditView().window().windowController()
 		except AttributeError:
@@ -447,14 +447,13 @@ class TunniBars(ReporterPlugin):
 			return False
 		if currentController:
 			tool = currentController.toolDrawDelegate()
-			if not tool.isKindOfClass_(NSClassFromString("GlyphsToolHand")):
-				return True
+			return bool(tool.isKindOfClass_(NSClassFromString("GlyphsToolSelect")))
 		return False
 
 	@objc.python_method
 	def foreground(self, layer):
 		if not self.conditionsAreMetForDrawing():
-			return  # no bars in preview (space bar), Text tool or Hand tool
+			return  # bars only with the Select tool: not in text mode, preview or Hand tool
 		scale = self.getScale()
 		selection = set(layer.selection)
 		for a, b, c, d in curveSegments(layer):
