@@ -46,6 +46,8 @@ ROUNDING = 1.0
 BAR_TOLERANCE = 7.0
 HANDLE_MARGIN = 3.0
 
+DEBUG_KEY = "com.mekkablue.TunniBars.debug"
+
 # A drag that has seen no event for this long is considered abandoned (a mouse-up got lost).
 STALE_DRAG_SECONDS = 1.0
 
@@ -494,6 +496,10 @@ class TunniBars(ReporterPlugin):
 		"""Event monitor callback. Returns the event to pass it on, None to swallow it."""
 		try:
 			eventType = event.type()
+			if Glyphs.defaults.get(DEBUG_KEY) and eventType != NSEventTypeMouseMoved:
+				# Switch on in the Macro Panel: Glyphs.defaults["com.mekkablue.TunniBars.debug"] = True
+				print("TunniBars %.3f type=%s clicks=%s buttons=%s drag=%s" % (
+					event.timestamp(), eventType, event.clickCount(), NSEvent.pressedMouseButtons(), self.barDrag is not None))
 			if eventType == NSEventTypeLeftMouseDown:
 				if self.mouseDown(event):
 					return None
