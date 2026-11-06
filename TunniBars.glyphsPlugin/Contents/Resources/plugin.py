@@ -42,7 +42,7 @@ ROUNDING = 1.0
 # Tolerances in screen pixels for picking a Tunni bar with the mouse.
 # The bar is grabbable this far from its line. It yields to nodes, handles (HANDLE_MARGIN),
 # and to any curve that is closer to the mouse than the bar, so standard selection keeps working.
-BAR_TOLERANCE = 7.0
+BAR_TOLERANCE = 10.0
 HANDLE_MARGIN = 3.0
 
 DEBUG_KEY = "com.mekkablue.TunniBars.debug"
@@ -425,12 +425,25 @@ class TunniBars(ReporterPlugin):
 		})
 
 	@objc.python_method
+	def currentEditView(self):
+		"""
+		The Edit View of the current tab. self.controller is only reliably set while Glyphs is
+		drawing and can be None in mouse events, so fall back to the current tab of the font.
+		"""
+		controller = getattr(self, "controller", None)
+		if controller is not None:
+			return controller.graphicView()
+		font = Glyphs.font
+		tab = font.currentTab if font is not None else None
+		return tab.graphicView() if tab is not None else None
+
+	@objc.python_method
 	def conditionsAreMetForDrawing(self):
 		"""Don't draw while the Hand tool is active, which is what the space bar switches to temporarily."""
 		try:
-			currentController = self.controller.view().window().windowController()
+			currentController = self.currentEditView().window().windowController()
 		except AttributeError:
-			# controller, view or window not available (e.g. during window setup/teardown)
+			# view or window not available (e.g. during window setup/teardown)
 			return False
 		if currentController:
 			tool = currentController.toolDrawDelegate()
@@ -539,10 +552,9 @@ class TunniBars(ReporterPlugin):
 		"""The Edit View if this reporter is switched on, the Select tool is active, and the event is in the view."""
 		if not any(reporter.className() == self.className() for reporter in Glyphs.activeReporters):
 			return None
-		controller = getattr(self, "controller", None)
-		if controller is None:
+		view = self.currentEditView()
+		if view is None:
 			return None
-		view = controller.graphicView()
 		window = view.window()
 		if window is None or event.window() != window:
 			return None
