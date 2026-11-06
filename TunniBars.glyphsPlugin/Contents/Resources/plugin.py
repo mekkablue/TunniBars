@@ -614,6 +614,7 @@ class TunniBars(ReporterPlugin):
 	@objc.python_method
 	def mouseDragged(self, event):
 		drag = self.barDrag
+		NSCursor.closedHandCursor().set()  # Glyphs may reset the cursor (e.g. on redraw) while the button is down
 		if drag["state"] is None:
 			return
 		# Only the raw mouse movement between two events counts, in window points, divided by the zoom.
