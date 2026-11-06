@@ -25,9 +25,11 @@ from AppKit import (
 	NSEventMaskLeftMouseDown,
 	NSEventMaskLeftMouseDragged,
 	NSEventMaskLeftMouseUp,
+	NSEventMaskMouseMoved,
 	NSEventTypeLeftMouseDown,
 	NSEventTypeLeftMouseDragged,
 	NSEventTypeLeftMouseUp,
+	NSEventTypeMouseMoved,
 	NSUserDefaults,
 )
 from Foundation import NSClassFromString, NSPoint, NSPointInRect
@@ -38,8 +40,15 @@ from GlyphsApp.plugins import ReporterPlugin
 ROUNDING = 1.0
 
 # Tolerances in screen pixels for picking a Tunni bar with the mouse.
-BAR_TOLERANCE = 5.0
+# The bar is grabbable this far from its line. It yields to nodes, handles (HANDLE_MARGIN),
+# and to any curve that is closer to the mouse than the bar, so standard selection keeps working.
+BAR_TOLERANCE = 10.0
 HANDLE_MARGIN = 3.0
+
+DEBUG_KEY = "com.mekkablue.TunniBars.debug"
+
+# A drag that has seen no event for this long is considered abandoned (a mouse-up got lost).
+STALE_DRAG_SECONDS = 1.0
 
 EPSILON = 1e-9
 
@@ -105,6 +114,17 @@ def distanceToLineSegment(point, start, end):
 		return distance(point, start)
 	t = max(0.0, min(1.0, dot(subtract(point, start), direction) / squaredLength))
 	return distance(point, mix(start, end, t))
+
+
+def distanceToCurve(point, a, b, c, d, samples=24):
+	"""Distance from point to the cubic Bézier curve a, b, c, d (approximated by a polyline)."""
+	previous = a
+	best = float("inf")
+	for step in range(1, samples + 1):
+		current = bezierPoint(a, b, c, d, step / samples)
+		best = min(best, distanceToLineSegment(point, previous, current))
+		previous = current
+	return best
 
 
 def tunniPoint(a, b, c, d):
@@ -360,12 +380,20 @@ def segmentIsActive(selection, a, b, c, d):
 	return b in selection or c in selection or (a in selection and d in selection)
 
 
-def tunniColor(balanced, dark, alpha):
-	"""Blue for balanced handles, grey for unbalanced ones, each in a variant for light and dark backgrounds."""
+def tunniColor(balanced, dark, alpha, hover=False):
+	"""
+	Blue for balanced handles, grey for unbalanced ones, each in a variant for light and dark backgrounds.
+	The hovered bar is fully opaque, and brighter on dark backgrounds.
+	"""
 	if balanced:
-		red, green, blue = (0.35, 0.6, 1.0) if dark else (0.0, 0.35, 1.0)
+		if dark:
+			red, green, blue = (0.55, 0.75, 1.0) if hover else (0.35, 0.6, 1.0)
+		else:
+			red, green, blue = (0.0, 0.35, 1.0)
 	else:
-		red = green = blue = 0.75 if dark else 0.45
+		red = green = blue = (0.95 if hover else 0.75) if dark else 0.45
+	if hover:
+		alpha = 1.0
 	return NSColor.colorWithCalibratedRed_green_blue_alpha_(red, green, blue, alpha)
 
 
@@ -387,6 +415,7 @@ def handleSizeInPixels():
 class TunniBars(ReporterPlugin):
 
 	barDrag = None  # state of the Tunni bar drag in progress, if any
+	hoverBar = None  # (a, b, c, d) nodes of the Tunni bar under the mouse, if any
 
 	@objc.python_method
 	def settings(self):
@@ -396,12 +425,25 @@ class TunniBars(ReporterPlugin):
 		})
 
 	@objc.python_method
+	def currentEditView(self):
+		"""
+		The Edit View of the current tab. self.controller is only reliably set while Glyphs is
+		drawing and can be None in mouse events, so fall back to the current tab of the font.
+		"""
+		controller = getattr(self, "controller", None)
+		if controller is not None:
+			return controller.graphicView()
+		font = Glyphs.font
+		tab = font.currentTab if font is not None else None
+		return tab.graphicView() if tab is not None else None
+
+	@objc.python_method
 	def conditionsAreMetForDrawing(self):
 		"""Don't draw while the Hand tool is active, which is what the space bar switches to temporarily."""
 		try:
-			currentController = self.controller.view().window().windowController()
+			currentController = self.currentEditView().window().windowController()
 		except AttributeError:
-			# controller, view or window not available (e.g. during window setup/teardown)
+			# view or window not available (e.g. during window setup/teardown)
 			return False
 		if currentController:
 			tool = currentController.toolDrawDelegate()
@@ -433,8 +475,11 @@ class TunniBars(ReporterPlugin):
 			bar.moveToPoint_(NSPoint(*points[1]))
 			bar.lineToPoint_(NSPoint(*points[2]))
 			bar.setLineWidth_(1.0 / scale)
+			hover = self.hoverBar == (a, b, c, d)
+			if hover:
+				active = True
 			if active:
-				barColor = tunniColor(balanced, dark, 0.6 if balanced else 0.7)
+				barColor = tunniColor(balanced, dark, 0.6 if balanced else 0.7, hover)
 			else:
 				barColor = tunniColor(balanced, dark, 0.25)
 				bar.setLineDash_count_phase_([3.0 / scale, 3.0 / scale], 2, 0)
@@ -465,7 +510,8 @@ class TunniBars(ReporterPlugin):
 	@objc.python_method
 	def start(self):
 		self.barDrag = None
-		mask = NSEventMaskLeftMouseDown | NSEventMaskLeftMouseDragged | NSEventMaskLeftMouseUp
+		self.hoverBar = None
+		mask = NSEventMaskLeftMouseDown | NSEventMaskLeftMouseDragged | NSEventMaskLeftMouseUp | NSEventMaskMouseMoved
 		self.eventMonitor = NSEvent.addLocalMonitorForEventsMatchingMask_handler_(mask, self.handleEvent)
 
 	@objc.python_method
@@ -473,6 +519,10 @@ class TunniBars(ReporterPlugin):
 		"""Event monitor callback. Returns the event to pass it on, None to swallow it."""
 		try:
 			eventType = event.type()
+			if Glyphs.defaults.get(DEBUG_KEY) and eventType != NSEventTypeMouseMoved:
+				# Switch on in the Macro Panel: Glyphs.defaults["com.mekkablue.TunniBars.debug"] = True
+				print("TunniBars %.3f type=%s clicks=%s buttons=%s drag=%s" % (
+					event.timestamp(), eventType, event.clickCount(), NSEvent.pressedMouseButtons(), self.barDrag is not None))
 			if eventType == NSEventTypeLeftMouseDown:
 				if self.mouseDown(event):
 					return None
@@ -484,9 +534,17 @@ class TunniBars(ReporterPlugin):
 				if self.barDrag is not None:
 					self.mouseUp(event)
 					return None
+			elif eventType == NSEventTypeMouseMoved:
+				self.updateHover(event)
 		except Exception:
-			self.barDrag = None
 			LogError(traceback.format_exc())
+			if self.barDrag is not None:
+				if event.type() == NSEventTypeLeftMouseDragged:
+					return None  # keep swallowing the drag; Glyphs must not start a marquee. Mouse-up ends it.
+				if event.type() == NSEventTypeLeftMouseUp:
+					self.barDrag = None
+					return None
+			self.barDrag = None
 		return event
 
 	@objc.python_method
@@ -494,10 +552,9 @@ class TunniBars(ReporterPlugin):
 		"""The Edit View if this reporter is switched on, the Select tool is active, and the event is in the view."""
 		if not any(reporter.className() == self.className() for reporter in Glyphs.activeReporters):
 			return None
-		controller = getattr(self, "controller", None)
-		if controller is None:
+		view = self.currentEditView()
+		if view is None:
 			return None
-		view = controller.graphicView()
 		window = view.window()
 		if window is None or event.window() != window:
 			return None
@@ -519,17 +576,45 @@ class TunniBars(ReporterPlugin):
 			for node in path.nodes:
 				if distance(position, positionOf(node)) <= nodeRadius:
 					return None  # leave nodes and handles to the Select tool
+		tolerance = BAR_TOLERANCE / scale
+		bestBar, bestDistance = None, tolerance
+		curveDistance = float("inf")
 		for a, b, c, d in curveSegments(layer):
 			points = [positionOf(node) for node in (a, b, c, d)]
+			curveDistance = min(curveDistance, distanceToCurve(position, *points))
 			if tunniPoint(*points) is None:
 				continue
-			if distanceToLineSegment(position, points[1], points[2]) <= BAR_TOLERANCE / scale:
-				return a, b, c, d
-		return None
+			barDistance = distanceToLineSegment(position, points[1], points[2])
+			if barDistance <= bestDistance:
+				bestBar, bestDistance = (a, b, c, d), barDistance
+		if bestBar is not None and curveDistance < bestDistance:
+			return None  # a curve is closer than the bar: leave it to the Select tool
+		return bestBar
+
+	@objc.python_method
+	def updateHover(self, event):
+		"""Remember the Tunni bar that can be grabbed at the mouse position, to draw it highlighted."""
+		if self.barDrag is not None:
+			return
+		bar = None
+		if self.conditionsAreMetForDrawing():
+			view = self.editViewForEvent(event)
+			layer = view.activeLayer() if view is not None else None
+			if layer is not None:
+				bar = self.barAtLocation(layer, view.getActiveLocation_(event), view.scale())
+		if bar != self.hoverBar:
+			self.hoverBar = bar
+			Glyphs.redraw()
 
 	@objc.python_method
 	def mouseDown(self, event):
 		"""Returns True if the click hit a Tunni bar and was taken care of here."""
+		drag = self.barDrag
+		if drag is not None and event.timestamp() - drag["lastEventTime"] < STALE_DRAG_SECONDS:
+			# Another mouse-down while a drag is going on (the button is still held): never restart or
+			# drop the drag, and don't let it reach Glyphs, which would start a marquee selection.
+			drag["lastEventTime"] = event.timestamp()
+			return True
 		self.barDrag = None
 		if not self.conditionsAreMetForDrawing():
 			return False
@@ -545,28 +630,31 @@ class TunniBars(ReporterPlugin):
 			return False
 		if event.clickCount() >= 2:
 			self.balanceBar(layer, bar)
-			self.barDrag = {"layer": layer, "state": None, "undoOpen": False}  # swallow the rest of this click
+			self.barDrag = {"layer": layer, "state": None, "undoOpen": False, "lastEventTime": event.timestamp()}  # swallow the rest of this click
 		else:
 			windowPoint = event.locationInWindow()
 			self.barDrag = {
 				"layer": layer,
+				"view": view,
 				"bar": bar,
 				"state": dragStateForBar(*[positionOf(node) for node in bar]),
 				"previousPoint": (windowPoint.x, windowPoint.y),
 				"movement": 0.0,
 				"undoOpen": False,
+				"lastEventTime": event.timestamp(),
 			}
 		return True
 
 	@objc.python_method
 	def mouseDragged(self, event):
 		drag = self.barDrag
+		drag["lastEventTime"] = event.timestamp()
 		if drag["state"] is None:
 			return
 		# Only the raw mouse movement between two events counts, in window points, divided by the zoom.
 		# Positions from getActiveLocation_() are not used here: they can jump from one drag event to
 		# the next, and a jump of a few units is all it takes to snap the handles to 0% or 100%.
-		scale = self.controller.graphicView().scale()
+		scale = drag["view"].scale()  # self.controller can be None while dragging
 		windowPoint = event.locationInWindow()
 		previousPoint = drag["previousPoint"]
 		drag["previousPoint"] = (windowPoint.x, windowPoint.y)
