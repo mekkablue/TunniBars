@@ -21,16 +21,19 @@ from AppKit import (
 	NSBeep,
 	NSBezierPath,
 	NSColor,
+	NSCursor,
 	NSEvent,
 	NSEventMaskLeftMouseDown,
 	NSEventMaskLeftMouseDragged,
 	NSEventMaskLeftMouseUp,
+	NSEventMaskMouseMoved,
 	NSEventTypeLeftMouseDown,
 	NSEventTypeLeftMouseDragged,
 	NSEventTypeLeftMouseUp,
+	NSEventTypeMouseMoved,
 	NSUserDefaults,
 )
-from Foundation import NSClassFromString, NSPoint, NSPointInRect
+from Foundation import NSClassFromString, NSOperationQueue, NSPoint, NSPointInRect
 from GlyphsApp import Glyphs, GSOFFCURVE, LogError
 from GlyphsApp.plugins import ReporterPlugin
 
@@ -38,7 +41,9 @@ from GlyphsApp.plugins import ReporterPlugin
 ROUNDING = 1.0
 
 # Tolerances in screen pixels for picking a Tunni bar with the mouse.
-BAR_TOLERANCE = 5.0
+# The bar is grabbable this far from its line. It yields to nodes, handles (HANDLE_MARGIN),
+# and to any curve that is closer to the mouse than the bar, so standard selection keeps working.
+BAR_TOLERANCE = 7.0
 HANDLE_MARGIN = 3.0
 
 EPSILON = 1e-9
@@ -105,6 +110,17 @@ def distanceToLineSegment(point, start, end):
 		return distance(point, start)
 	t = max(0.0, min(1.0, dot(subtract(point, start), direction) / squaredLength))
 	return distance(point, mix(start, end, t))
+
+
+def distanceToCurve(point, a, b, c, d, samples=24):
+	"""Distance from point to the cubic Bézier curve a, b, c, d (approximated by a polyline)."""
+	previous = a
+	best = float("inf")
+	for step in range(1, samples + 1):
+		current = bezierPoint(a, b, c, d, step / samples)
+		best = min(best, distanceToLineSegment(point, previous, current))
+		previous = current
+	return best
 
 
 def tunniPoint(a, b, c, d):
@@ -387,6 +403,7 @@ def handleSizeInPixels():
 class TunniBars(ReporterPlugin):
 
 	barDrag = None  # state of the Tunni bar drag in progress, if any
+	cursorIsOverBar = False  # True while we have set the pointing hand cursor
 
 	@objc.python_method
 	def settings(self):
@@ -465,7 +482,8 @@ class TunniBars(ReporterPlugin):
 	@objc.python_method
 	def start(self):
 		self.barDrag = None
-		mask = NSEventMaskLeftMouseDown | NSEventMaskLeftMouseDragged | NSEventMaskLeftMouseUp
+		self.cursorIsOverBar = False
+		mask = NSEventMaskLeftMouseDown | NSEventMaskLeftMouseDragged | NSEventMaskLeftMouseUp | NSEventMaskMouseMoved
 		self.eventMonitor = NSEvent.addLocalMonitorForEventsMatchingMask_handler_(mask, self.handleEvent)
 
 	@objc.python_method
@@ -484,6 +502,8 @@ class TunniBars(ReporterPlugin):
 				if self.barDrag is not None:
 					self.mouseUp(event)
 					return None
+			elif eventType == NSEventTypeMouseMoved:
+				self.updateCursor(event)
 		except Exception:
 			self.barDrag = None
 			LogError(traceback.format_exc())
@@ -519,13 +539,45 @@ class TunniBars(ReporterPlugin):
 			for node in path.nodes:
 				if distance(position, positionOf(node)) <= nodeRadius:
 					return None  # leave nodes and handles to the Select tool
+		tolerance = BAR_TOLERANCE / scale
+		bestBar, bestDistance = None, tolerance
+		curveDistance = float("inf")
 		for a, b, c, d in curveSegments(layer):
 			points = [positionOf(node) for node in (a, b, c, d)]
+			curveDistance = min(curveDistance, distanceToCurve(position, *points))
 			if tunniPoint(*points) is None:
 				continue
-			if distanceToLineSegment(position, points[1], points[2]) <= BAR_TOLERANCE / scale:
-				return a, b, c, d
-		return None
+			barDistance = distanceToLineSegment(position, points[1], points[2])
+			if barDistance <= bestDistance:
+				bestBar, bestDistance = (a, b, c, d), barDistance
+		if bestBar is not None and curveDistance < bestDistance:
+			return None  # a curve is closer than the bar: leave it to the Select tool
+		return bestBar
+
+	@objc.python_method
+	def setCursorLater(self, cursor):
+		"""Glyphs sets its own cursor while handling the event, so set ours right after that."""
+		NSOperationQueue.mainQueue().addOperationWithBlock_(lambda: cursor.set())
+
+	@objc.python_method
+	def updateCursor(self, event):
+		"""Pointing hand while the mouse is over a Tunni bar that can be grabbed."""
+		if self.barDrag is not None:
+			return
+		bar = None
+		if self.conditionsAreMetForDrawing():
+			view = self.editViewForEvent(event)
+			layer = view.activeLayer() if view is not None else None
+			if layer is not None:
+				bar = self.barAtLocation(layer, view.getActiveLocation_(event), view.scale())
+		if bar is not None:
+			self.cursorIsOverBar = True
+			NSCursor.pointingHandCursor().set()
+			self.setCursorLater(NSCursor.pointingHandCursor())
+		elif self.cursorIsOverBar:
+			self.cursorIsOverBar = False
+			NSCursor.arrowCursor().set()
+			self.setCursorLater(NSCursor.arrowCursor())
 
 	@objc.python_method
 	def mouseDown(self, event):
@@ -548,6 +600,7 @@ class TunniBars(ReporterPlugin):
 			self.barDrag = {"layer": layer, "state": None, "undoOpen": False}  # swallow the rest of this click
 		else:
 			windowPoint = event.locationInWindow()
+			NSCursor.closedHandCursor().set()
 			self.barDrag = {
 				"layer": layer,
 				"bar": bar,
@@ -585,6 +638,8 @@ class TunniBars(ReporterPlugin):
 	def mouseUp(self, event):
 		drag = self.barDrag
 		self.barDrag = None
+		self.cursorIsOverBar = False
+		NSCursor.arrowCursor().set()
 		if drag["undoOpen"]:
 			drag["layer"].parent.endUndo()
 
